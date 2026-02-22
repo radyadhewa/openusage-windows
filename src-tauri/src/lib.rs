@@ -1,21 +1,99 @@
 #[cfg(target_os = "macos")]
 mod app_nap;
-mod panel;
 mod plugin_engine;
 mod tray;
 #[cfg(target_os = "macos")]
 mod webkit_config;
+mod window;
 
 use std::collections::{HashMap, HashSet};
-use tauri_plugin_aptabase::EventTracker;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::Emitter;
+use tauri_plugin_aptabase::EventTracker;
 use tauri_plugin_log::{Target, TargetKind};
 use uuid::Uuid;
+
+#[cfg(desktop)]
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+const GLOBAL_SHORTCUT_STORE_KEY: &str = "globalShortcut";
+const APP_STARTED_TRACKED_DAY_KEY_PREFIX: &str = "analytics.app_started_day.";
+
+fn app_started_day_key(version: &str) -> String {
+    format!("{}{}", APP_STARTED_TRACKED_DAY_KEY_PREFIX, version)
+}
+
+fn today_utc_ymd() -> String {
+    let date = time::OffsetDateTime::now_utc().date();
+    format!(
+        "{:04}-{:02}-{:02}",
+        date.year(),
+        date.month() as u8,
+        date.day()
+    )
+}
+
+fn should_track_app_started(last_tracked_day: Option<&str>, today: &str) -> bool {
+    match last_tracked_day {
+        Some(day) => day != today,
+        None => true,
+    }
+}
+
+#[cfg(desktop)]
+fn track_app_started_once_per_day_per_version(app: &tauri::App) {
+    use tauri_plugin_store::StoreExt;
+
+    let version = app.package_info().version.to_string();
+    let key = app_started_day_key(&version);
+    let today = today_utc_ymd();
+
+    let store = match app.handle().store("settings.json") {
+        Ok(store) => store,
+        Err(error) => {
+            log::warn!("Failed to access settings store for app_started gate: {}", error);
+            return;
+        }
+    };
+
+    let last_tracked_day = store
+        .get(&key)
+        .and_then(|value| value.as_str().map(|value| value.to_string()));
+
+    if !should_track_app_started(last_tracked_day.as_deref(), &today) {
+        return;
+    }
+
+    let _ = app.track_event("app_started", None);
+
+    store.set(&key, serde_json::Value::String(today));
+    if let Err(error) = store.save() {
+        log::warn!("Failed to save app_started tracked day: {}", error);
+    }
+}
+
+#[cfg(not(desktop))]
+fn track_app_started_once_per_day_per_version(app: &tauri::App) {
+    let _ = app.track_event("app_started", None);
+}
+
+#[cfg(desktop)]
+fn managed_shortcut_slot() -> &'static Mutex<Option<String>> {
+    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(desktop)]
+fn handle_global_shortcut(app: &tauri::AppHandle, event: tauri_plugin_global_shortcut::ShortcutEvent) {
+    if event.state == ShortcutState::Pressed {
+        log::debug!("Global shortcut triggered");
+        crate::window::toggle_window(app);
+    }
+}
 
 pub struct AppState {
     pub plugins: Vec<plugin_engine::manifest::LoadedPlugin>,
@@ -31,8 +109,7 @@ pub struct PluginMeta {
     pub icon_url: String,
     pub brand_color: Option<String>,
     pub lines: Vec<ManifestLineDto>,
-    /// Ordered list of primary metric candidates (sorted by primaryOrder).
-    /// Frontend picks the first one that exists in runtime data.
+    pub links: Vec<PluginLinkDto>,
     pub primary_candidates: Vec<String>,
 }
 
@@ -43,6 +120,13 @@ pub struct ManifestLineDto {
     pub line_type: String,
     pub label: String,
     pub scope: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginLinkDto {
+    pub label: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,16 +150,11 @@ pub struct ProbeBatchComplete {
 }
 
 #[tauri::command]
-fn init_panel(app_handle: tauri::AppHandle) {
-    panel::init(&app_handle).expect("Failed to initialize panel");
-}
+fn init_panel() {}
 
 #[tauri::command]
 fn hide_panel(app_handle: tauri::AppHandle) {
-    use tauri_nspanel::ManagerExt;
-    if let Ok(panel) = app_handle.get_webview_panel("main") {
-        panel.hide();
-    }
+    crate::window::hide_window(&app_handle);
 }
 
 #[tauri::command]
@@ -201,12 +280,62 @@ async fn start_probe_batch(
 
 #[tauri::command]
 fn get_log_path(app_handle: tauri::AppHandle) -> Result<String, String> {
-    // macOS log directory: ~/Library/Logs/{bundleIdentifier}
-    let home = dirs::home_dir().ok_or("no home dir")?;
-    let bundle_id = app_handle.config().identifier.clone();
-    let log_dir = home.join("Library").join("Logs").join(&bundle_id);
+    use tauri::Manager;
+    let log_dir = app_handle
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("no app log dir: {}", e))?;
     let log_file = log_dir.join(format!("{}.log", app_handle.package_info().name));
     Ok(log_file.to_string_lossy().to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn update_global_shortcut(app_handle: tauri::AppHandle, shortcut: Option<String>) -> Result<(), String> {
+    let global_shortcut = app_handle.global_shortcut();
+    let normalized_shortcut = shortcut.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let mut managed_shortcut = managed_shortcut_slot()
+        .lock()
+        .map_err(|e| format!("failed to lock managed shortcut state: {}", e))?;
+
+    if *managed_shortcut == normalized_shortcut {
+        log::debug!("Global shortcut unchanged");
+        return Ok(());
+    }
+
+    let previous_shortcut = managed_shortcut.clone();
+    if let Some(existing) = previous_shortcut.as_deref() {
+        match global_shortcut.unregister(existing) {
+            Ok(()) => {
+                *managed_shortcut = None;
+            }
+            Err(e) => {
+                log::warn!("Failed to unregister existing shortcut '{}': {}", existing, e);
+            }
+        }
+    }
+
+    if let Some(shortcut) = normalized_shortcut {
+        log::info!("Registering global shortcut: {}", shortcut);
+        global_shortcut
+            .on_shortcut(shortcut.as_str(), |app, _shortcut, event| {
+                handle_global_shortcut(app, event);
+            })
+            .map_err(|e| format!("Failed to register shortcut '{}': {}", shortcut, e))?;
+        *managed_shortcut = Some(shortcut);
+    } else {
+        log::info!("Global shortcut disabled");
+        *managed_shortcut = None;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -220,7 +349,6 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
     plugins
         .into_iter()
         .map(|plugin| {
-            // Extract primary candidates: progress lines with primary_order, sorted by order
             let mut candidates: Vec<_> = plugin
                 .manifest
                 .lines
@@ -246,6 +374,15 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
                         scope: line.scope.clone(),
                     })
                     .collect(),
+                links: plugin
+                    .manifest
+                    .links
+                    .iter()
+                    .map(|link| PluginLinkDto {
+                        label: link.label.clone(),
+                        url: link.url.clone(),
+                    })
+                    .collect(),
                 primary_candidates,
             }
         })
@@ -261,15 +398,14 @@ pub fn run() {
         .plugin(tauri_plugin_aptabase::Builder::new("A-US-6435241436").build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_nspanel::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir { file_name: None }),
                 ])
-                .max_file_size(10_000_000) // 10 MB
-                .level(log::LevelFilter::Trace) // Allow all levels; runtime filter via tray menu
+                .max_file_size(10_000_000)
+                .level(log::LevelFilter::Trace)
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("reqwest", log::LevelFilter::Warn)
                 .level_for("tao", log::LevelFilter::Info)
@@ -277,12 +413,15 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             init_panel,
             hide_panel,
             start_probe_batch,
             list_plugins,
-            get_log_path
+            get_log_path,
+            update_global_shortcut
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -299,7 +438,7 @@ pub fn run() {
             let version = app.package_info().version.to_string();
             log::info!("OpenUsage v{} starting", version);
 
-            let _ = app.track_event("app_started", None);
+            track_app_started_once_per_day_per_version(app);
 
             let app_data_dir = app.path().app_data_dir().expect("no app data dir");
             let resource_dir = app.path().resource_dir().expect("no resource dir");
@@ -316,9 +455,84 @@ pub fn run() {
 
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_store::StoreExt;
+
+                if let Ok(store) = app.handle().store("settings.json") {
+                    if let Some(shortcut_value) = store.get(GLOBAL_SHORTCUT_STORE_KEY) {
+                        if let Some(shortcut) = shortcut_value.as_str() {
+                            let shortcut = shortcut.trim();
+                            if !shortcut.is_empty() {
+                                let handle = app.handle().clone();
+                                log::info!("Registering initial global shortcut: {}", shortcut);
+                                if let Err(e) = handle.global_shortcut().on_shortcut(
+                                    shortcut,
+                                    |app, _shortcut, event| {
+                                        handle_global_shortcut(app, event);
+                                    },
+                                ) {
+                                    log::warn!("Failed to register initial global shortcut: {}", e);
+                                } else if let Ok(mut managed_shortcut) = managed_shortcut_slot().lock()
+                                {
+                                    *managed_shortcut = Some(shortcut.to_string());
+                                } else {
+                                    log::warn!("Failed to store managed shortcut in memory");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_, _| {});
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                api.prevent_exit();
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            _ => {}
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{app_started_day_key, should_track_app_started};
+
+    #[test]
+    fn should_track_when_no_previous_day() {
+        assert!(should_track_app_started(None, "2026-02-12"));
+    }
+
+    #[test]
+    fn should_not_track_when_same_day() {
+        assert!(!should_track_app_started(Some("2026-02-12"), "2026-02-12"));
+    }
+
+    #[test]
+    fn should_track_when_day_changes() {
+        assert!(should_track_app_started(Some("2026-02-11"), "2026-02-12"));
+    }
+
+    #[test]
+    fn key_is_version_scoped() {
+        let v1_key = app_started_day_key("0.6.2");
+        let v2_key = app_started_day_key("0.6.3");
+        assert_ne!(v1_key, v2_key);
+        assert!(v1_key.ends_with("0.6.2"));
+        assert!(v2_key.ends_with("0.6.3"));
+    }
 }
