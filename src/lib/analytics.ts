@@ -1,12 +1,10 @@
-import { trackEvent } from "@aptabase/tauri"
-
 /**
- * Thin wrapper around Aptabase's trackEvent.
- * Aptabase only supports string and number property values.
+ * Thin wrapper around analytics tracking.
+ * Aptabase removed for Windows ARM64 compatibility — calls are no-ops.
  */
 export function track(
-  event: string,
-  props?: Record<string, string | number>,
+  _event: string,
+  _props?: Record<string, string | number>,
 ) {
-  trackEvent(event, props)
+  // no-op: aptabase plugin removed
 }

@@ -18,8 +18,10 @@
         "height": 500,
         "resizable": false,
         "decorations": false,
-        "transparent": true,
-        "visible": false
+        "transparent": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
@@ -54,16 +56,8 @@
     ],
     "resources": [
       "resources/bundled_plugins/**/*",
-      "icons/tray-icon.png"
+      "icons/32x32.png"
     ],
-    "createUpdaterArtifacts": true
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU2Njk4QTU0MDMzMEY5MTkKUldRWitUQURWSXBwVnFTY1FBWitxNlpaQnB5S3RVWW1qWHJ3NlRuZ2p3c2hPVzNTa3BUR0V0SXkK",
-      "endpoints": [
-        "https://github.com/robinebers/openusage/releases/latest/download/latest.json"
-      ]
-    }
+    "createUpdaterArtifacts": false
   }
 }

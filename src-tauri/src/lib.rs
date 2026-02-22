@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::Emitter;
-use tauri_plugin_aptabase::EventTracker;
 use tauri_plugin_log::{Target, TargetKind};
 use uuid::Uuid;
 
@@ -68,7 +67,7 @@ fn track_app_started_once_per_day_per_version(app: &tauri::App) {
         return;
     }
 
-    let _ = app.track_event("app_started", None);
+    // aptabase removed for Windows ARM64 compatibility
 
     store.set(&key, serde_json::Value::String(today));
     if let Err(error) = store.save() {
@@ -77,8 +76,8 @@ fn track_app_started_once_per_day_per_version(app: &tauri::App) {
 }
 
 #[cfg(not(desktop))]
-fn track_app_started_once_per_day_per_version(app: &tauri::App) {
-    let _ = app.track_event("app_started", None);
+fn track_app_started_once_per_day_per_version(_app: &tauri::App) {
+    // aptabase removed
 }
 
 #[cfg(desktop)]
@@ -109,7 +108,6 @@ pub struct PluginMeta {
     pub icon_url: String,
     pub brand_color: Option<String>,
     pub lines: Vec<ManifestLineDto>,
-    pub links: Vec<PluginLinkDto>,
     pub primary_candidates: Vec<String>,
 }
 
@@ -150,7 +148,9 @@ pub struct ProbeBatchComplete {
 }
 
 #[tauri::command]
-fn init_panel() {}
+fn init_panel() {
+    // no-op: window hiding is handled by the run loop
+}
 
 #[tauri::command]
 fn hide_panel(app_handle: tauri::AppHandle) {
@@ -374,15 +374,6 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
                         scope: line.scope.clone(),
                     })
                     .collect(),
-                links: plugin
-                    .manifest
-                    .links
-                    .iter()
-                    .map(|link| PluginLinkDto {
-                        label: link.label.clone(),
-                        url: link.url.clone(),
-                    })
-                    .collect(),
                 primary_candidates,
             }
         })
@@ -391,11 +382,14 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("PANIC: {}", info);
+    }));
+
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let _guard = runtime.enter();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_aptabase::Builder::new("A-US-6435241436").build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(
@@ -409,7 +403,6 @@ pub fn run() {
                 .level_for("hyper", log::LevelFilter::Warn)
                 .level_for("reqwest", log::LevelFilter::Warn)
                 .level_for("tao", log::LevelFilter::Info)
-                .level_for("tauri_plugin_updater", log::LevelFilter::Info)
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
@@ -441,19 +434,29 @@ pub fn run() {
             track_app_started_once_per_day_per_version(app);
 
             let app_data_dir = app.path().app_data_dir().expect("no app data dir");
-            let resource_dir = app.path().resource_dir().expect("no resource dir");
+            eprintln!("DEBUG: app_data_dir = {:?}", app_data_dir);
+
+            let resource_dir = match app.path().resource_dir() {
+                Ok(d) => { eprintln!("DEBUG: resource_dir = {:?}", d); d }
+                Err(e) => { eprintln!("FATAL: resource_dir failed: {:?}", e); return Err(Box::new(e)); }
+            };
             log::debug!("app_data_dir: {:?}", app_data_dir);
 
+            eprintln!("DEBUG: calling initialize_plugins");
             let (_, plugins) = plugin_engine::initialize_plugins(&app_data_dir, &resource_dir);
+            eprintln!("DEBUG: plugins loaded: {}", plugins.len());
             app.manage(Mutex::new(AppState {
                 plugins,
                 app_data_dir,
                 app_version: app.package_info().version.to_string(),
             }));
+            eprintln!("DEBUG: calling tray::create");
 
-            tray::create(app.handle())?;
-
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            if let Err(e) = tray::create(app.handle()) {
+                eprintln!("FATAL: tray::create failed: {:?}", e);
+                return Err(Box::new(e));
+            }
+            eprintln!("DEBUG: setup complete, entering run loop");
 
             #[cfg(desktop)]
             {
@@ -491,18 +494,42 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
+                eprintln!("DEBUG runloop: ExitRequested");
                 api.prevent_exit();
             }
             tauri::RunEvent::WindowEvent {
-                label,
-                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ref label,
+                ref event,
                 ..
-            } if label == "main" => {
-                api.prevent_close();
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+            } => {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } if label == "main" => {
+                        eprintln!("DEBUG runloop: CloseRequested on main");
+                        api.prevent_close();
+                        use tauri::Manager;
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        eprintln!("DEBUG runloop: window '{}' Destroyed", label);
+                    }
+                    _ => {}
                 }
+            }
+            tauri::RunEvent::Exit => {
+                eprintln!("DEBUG runloop: Exit");
+            }
+            tauri::RunEvent::Ready => {
+                eprintln!("DEBUG runloop: Ready");
+                use tauri::Manager;
+                let handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                });
             }
             _ => {}
         });
