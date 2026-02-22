@@ -44,21 +44,14 @@ fn set_stored_log_level(app_handle: &AppHandle, level: log::LevelFilter) {
 pub fn create(app_handle: &AppHandle) -> tauri::Result<()> {
     let tray_icon_path = app_handle
         .path()
-        .resolve("icons/32x32.png", BaseDirectory::Resource)
-        .map_err(|e| { eprintln!("FATAL tray: resolve icon path failed: {:?}", e); e })?;
-    eprintln!("DEBUG tray: icon path = {:?}", tray_icon_path);
-    let icon = Image::from_path(&tray_icon_path)
-        .map_err(|e| { eprintln!("FATAL tray: Image::from_path({:?}) failed: {:?}", tray_icon_path, e); e })?;
-    eprintln!("DEBUG tray: icon loaded ok");
+        .resolve("icons/32x32.png", BaseDirectory::Resource)?;
+    let icon = Image::from_path(&tray_icon_path)?;
 
     let current_level = get_stored_log_level(app_handle);
     log::set_max_level(current_level);
 
-    let show_stats = MenuItem::with_id(app_handle, "show_stats", "Show Stats", true, None::<&str>)
-        .map_err(|e| { eprintln!("FATAL tray: show_stats failed: {:?}", e); e })?;
-    let go_to_settings = MenuItem::with_id(app_handle, "go_to_settings", "Go to Settings", true, None::<&str>)
-        .map_err(|e| { eprintln!("FATAL tray: go_to_settings failed: {:?}", e); e })?;
-    eprintln!("DEBUG tray: menu items ok");
+    let show_stats = MenuItem::with_id(app_handle, "show_stats", "Show Stats", true, None::<&str>)?;
+    let go_to_settings = MenuItem::with_id(app_handle, "go_to_settings", "Go to Settings", true, None::<&str>)?;
 
     let log_error = CheckMenuItem::with_id(app_handle, "log_error", "Error", true, current_level == log::LevelFilter::Error, None::<&str>)?;
     let log_warn = CheckMenuItem::with_id(app_handle, "log_warn", "Warn", true, current_level == log::LevelFilter::Warn, None::<&str>)?;
@@ -70,7 +63,7 @@ pub fn create(app_handle: &AppHandle) -> tauri::Result<()> {
         "Debug Level",
         true,
         &[&log_error, &log_warn, &log_info, &log_debug, &log_trace],
-    ).map_err(|e| { eprintln!("FATAL tray: log_level_submenu failed: {:?}", e); e })?;
+    )?;
 
     let log_items = [
         (log_error.clone(), log::LevelFilter::Error),
@@ -84,9 +77,7 @@ pub fn create(app_handle: &AppHandle) -> tauri::Result<()> {
     let about = MenuItem::with_id(app_handle, "about", "About OpenUsage", true, None::<&str>)?;
     let quit = MenuItem::with_id(app_handle, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app_handle, &[&show_stats, &go_to_settings, &log_level_submenu, &separator, &about, &quit])
-        .map_err(|e| { eprintln!("FATAL tray: Menu::with_items failed: {:?}", e); e })?;
-    eprintln!("DEBUG tray: menu built ok");
+    let menu = Menu::with_items(app_handle, &[&show_stats, &go_to_settings, &log_level_submenu, &separator, &about, &quit])?;
 
     TrayIconBuilder::with_id("tray")
         .icon(icon)
@@ -140,9 +131,7 @@ pub fn create(app_handle: &AppHandle) -> tauri::Result<()> {
                 }
             }
         })
-        .build(app_handle)
-        .map_err(|e| { eprintln!("FATAL tray: TrayIconBuilder::build failed: {:?}", e); e })?;
-    eprintln!("DEBUG tray: tray icon built ok");
+        .build(app_handle)?;
 
     Ok(())
 }
