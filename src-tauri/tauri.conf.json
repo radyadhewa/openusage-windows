@@ -17,10 +17,9 @@
         "width": 400,
         "height": 500,
         "resizable": false,
-        "decorations": true,
-        "transparent": false,
-        "shadow": true,
-        "visible": true,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
         "skipTaskbar": true,
         "alwaysOnTop": true
       }
