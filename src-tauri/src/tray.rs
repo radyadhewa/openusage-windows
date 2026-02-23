@@ -44,7 +44,7 @@ fn set_stored_log_level(app_handle: &AppHandle, level: log::LevelFilter) {
 pub fn create(app_handle: &AppHandle) -> tauri::Result<()> {
     let tray_icon_path = app_handle
         .path()
-        .resolve("icons/32x32.png", BaseDirectory::Resource)?;
+        .resolve("icons/tray-icon.png", BaseDirectory::Resource)?;
     let icon = Image::from_path(&tray_icon_path)?;
 
     let current_level = get_stored_log_level(app_handle);

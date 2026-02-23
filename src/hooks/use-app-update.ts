@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef } from "react"
-import { track } from "@/lib/analytics"
+import { useState, useCallback } from "react"
+// import { track } from "@/lib/analytics"
 
 export type UpdateStatus =
   | { status: "idle" }

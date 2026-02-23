@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:resources:default",
     "core:tray:default",
     "core:image:default",
     "core:window:allow-set-size",

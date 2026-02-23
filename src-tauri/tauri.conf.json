@@ -4,7 +4,7 @@
   "version": "0.6.5",
   "identifier": "com.sunstory.openusage",
   "build": {
-    "beforeDevCommand": "bun run bundle:plugins && bun run dev",
+    "beforeDevCommand": "bun run bundle:plugins && bunx --bun vite",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bun run bundle:plugins && bun run build",
     "frontendDist": "../dist"
@@ -56,7 +56,7 @@
     ],
     "resources": [
       "resources/bundled_plugins/**/*",
-      "icons/32x32.png"
+      "icons/tray-icon.png"
     ],
     "createUpdaterArtifacts": false
   }

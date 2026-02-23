@@ -4,7 +4,8 @@
   "version": "0.6.5",
   "type": "module",
   "scripts": {
-    "dev": "bunx --bun vite",
+    "cleanup": "bunx kill-port 1420",
+    "dev": "bun run cleanup && bunx --bun vite",
     "build": "tsc && bunx --bun vite build",
     "build:release": "./scripts/build-release.sh",
     "bundle:plugins": "bun copy-bundled.cjs",
